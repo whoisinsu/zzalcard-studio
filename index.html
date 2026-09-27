@@ -168,6 +168,8 @@
       <p class="tagline">이미지와 문구로 밈·카드·SNS 게시 이미지를 만들고 바로 내려받으세요</p>
     </div>
     <div class="topbar-controls">
+      <button class="btn btn-sm" id="undoBtn" type="button" title="실행취소 (Ctrl+Z)" aria-label="실행취소" disabled>↶ 실행취소</button>
+      <button class="btn btn-sm" id="redoBtn" type="button" title="다시실행 (Ctrl+Shift+Z)" aria-label="다시실행" disabled>↷ 다시실행</button>
       <div class="segmented" id="ratioSwitch" aria-label="화면비 선택"></div>
       <div class="segmented" id="formatSwitch" aria-label="파일 형식 선택"></div>
       <button class="btn-primary" id="downloadBtn" type="button">이미지 내려받기</button>
@@ -308,6 +310,80 @@
   const tplList = $("#tplList");
   const bgColorInput = $("#bgColorInput");
   const imageActionsField = $("#imageActionsField");
+  const undoBtn = $("#undoBtn");
+  const redoBtn = $("#redoBtn");
+
+  // ---------- undo / redo history ----------
+  const MAX_HISTORY = 50;
+  let undoStack = [];
+  let redoStack = [];
+
+  function cloneTexts(texts){
+    return texts.map(t => ({
+      id:t.id, content:t.content, x:t.x, y:t.y, fontSize:t.fontSize, color:t.color,
+      fontFamily:t.fontFamily, align:t.align, outline:t.outline, outlineColor:t.outlineColor,
+      bg:t.bg, bgColor:t.bgColor, bgOpacity:t.bgOpacity
+    }));
+  }
+  function snapshotState(){
+    return {
+      ratio: state.ratio, bgColor: state.bgColor, preset: state.preset,
+      imageDataUrl: state.image ? state.image.dataUrl : null,
+      texts: cloneTexts(state.texts), selectedId: state.selectedId
+    };
+  }
+  function refreshUndoRedoButtons(){
+    undoBtn.disabled = undoStack.length === 0;
+    redoBtn.disabled = redoStack.length === 0;
+  }
+  function pushHistory(){
+    undoStack.push(snapshotState());
+    if (undoStack.length > MAX_HISTORY) undoStack.shift();
+    redoStack = [];
+    refreshUndoRedoButtons();
+  }
+  async function restoreSnapshot(snap){
+    state.ratio = snap.ratio;
+    state.bgColor = snap.bgColor;
+    state.preset = snap.preset;
+    state.texts = cloneTexts(snap.texts);
+    state.selectedId = (snap.selectedId && state.texts.some(t => t.id === snap.selectedId))
+      ? snap.selectedId : (state.texts[0] ? state.texts[0].id : null);
+    if (snap.imageDataUrl){
+      try { state.image = { dataUrl: snap.imageDataUrl, el: await loadImageEl(snap.imageDataUrl) }; imageActionsField.hidden = false; }
+      catch(e){ state.image = null; imageActionsField.hidden = true; }
+    } else {
+      state.image = null; imageActionsField.hidden = true;
+    }
+    bgColorInput.value = state.bgColor;
+    refreshRatioSwitch(); refreshPresets(); renderLayerList();
+    scheduleRender();
+  }
+  async function undo(){
+    if (undoStack.length === 0) return;
+    const current = snapshotState();
+    const prev = undoStack.pop();
+    redoStack.push(current);
+    if (redoStack.length > MAX_HISTORY) redoStack.shift();
+    await restoreSnapshot(prev);
+    refreshUndoRedoButtons();
+  }
+  async function redo(){
+    if (redoStack.length === 0) return;
+    const current = snapshotState();
+    const next = redoStack.pop();
+    undoStack.push(current);
+    if (undoStack.length > MAX_HISTORY) undoStack.shift();
+    await restoreSnapshot(next);
+    refreshUndoRedoButtons();
+  }
+  undoBtn.addEventListener("click", undo);
+  redoBtn.addEventListener("click", redo);
+  document.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== "z") return;
+    e.preventDefault();
+    if (e.shiftKey) redo(); else undo();
+  });
 
   // ---------- status ----------
   let statusTimer = null;
@@ -524,7 +600,7 @@
   }
   function refreshRatioSwitch(){
     buildSegmented(ratioSwitch, Object.keys(RATIOS).map(k => ({value:k, label:RATIOS[k].label})), state.ratio, (val) => {
-      state.ratio = val; refreshRatioSwitch(); scheduleRender();
+      pushHistory(); state.ratio = val; refreshRatioSwitch(); scheduleRender();
     });
   }
   function refreshFormatSwitch(){
@@ -544,7 +620,7 @@
       btn.setAttribute("aria-label", p.name);
       btn.setAttribute("aria-pressed", String(state.preset === p.id && !state.image));
       btn.style.background = `linear-gradient(135deg, ${p.a}, ${p.b})`;
-      btn.onclick = () => { state.preset = p.id; refreshPresets(); scheduleRender(); };
+      btn.onclick = () => { pushHistory(); state.preset = p.id; refreshPresets(); scheduleRender(); };
       presetGrid.appendChild(btn);
     });
   }
@@ -603,6 +679,7 @@
   async function handleImageFile(file){
     try {
       const result = await validateAndReadImage(file);
+      pushHistory();
       state.image = { dataUrl: result.dataUrl, el: result.el };
       imageActionsField.hidden = false;
       refreshPresets();
@@ -671,6 +748,7 @@
     textarea.rows = 3;
     textarea.value = layer.content;
     textarea.setAttribute("aria-label","문구 내용");
+    textarea.addEventListener("focus", () => pushHistory());
     textarea.oninput = () => {
       layer.content = textarea.value;
       const swatch = body.parentElement.querySelector(".layer-swatch");
@@ -687,12 +765,14 @@
     const xInput = document.createElement("input");
     xInput.type = "range"; xInput.min = 0; xInput.max = 100; xInput.value = Math.round(layer.x*100);
     const xVal = document.createElement("div"); xVal.className = "rangeval"; xVal.textContent = "가로 " + xInput.value + "%";
+    xInput.addEventListener("focus", () => pushHistory());
     xInput.oninput = () => { layer.x = xInput.value/100; xVal.textContent = "가로 " + xInput.value + "%"; scheduleRender(); };
     xWrap.appendChild(xInput); xWrap.appendChild(xVal);
     const yWrap = document.createElement("div");
     const yInput = document.createElement("input");
     yInput.type = "range"; yInput.min = 0; yInput.max = 100; yInput.value = Math.round(layer.y*100);
     const yVal = document.createElement("div"); yVal.className = "rangeval"; yVal.textContent = "세로 " + yInput.value + "%";
+    yInput.addEventListener("focus", () => pushHistory());
     yInput.oninput = () => { layer.y = yInput.value/100; yVal.textContent = "세로 " + yInput.value + "%"; scheduleRender(); };
     yWrap.appendChild(yInput); yWrap.appendChild(yVal);
     posRow.appendChild(xWrap); posRow.appendChild(yWrap);
@@ -703,6 +783,7 @@
     const sizeInput = document.createElement("input");
     sizeInput.type = "range"; sizeInput.min = 16; sizeInput.max = 220; sizeInput.value = layer.fontSize;
     const sizeVal = document.createElement("div"); sizeVal.className = "rangeval"; sizeVal.textContent = layer.fontSize + "px";
+    sizeInput.addEventListener("focus", () => pushHistory());
     sizeInput.oninput = () => { layer.fontSize = Number(sizeInput.value); sizeVal.textContent = layer.fontSize + "px"; scheduleRender(); };
     const sizeWrap = document.createElement("div");
     sizeWrap.appendChild(sizeInput); sizeWrap.appendChild(sizeVal);
@@ -713,6 +794,7 @@
     cfRow.className = "row";
     const colorInput = document.createElement("input");
     colorInput.type = "color"; colorInput.value = layer.color;
+    colorInput.addEventListener("focus", () => pushHistory());
     colorInput.oninput = () => {
       layer.color = colorInput.value;
       const sw = body.parentElement.querySelector(".layer-swatch");
@@ -726,7 +808,7 @@
       if (f.value === layer.fontFamily) opt.selected = true;
       famSelect.appendChild(opt);
     });
-    famSelect.onchange = () => { layer.fontFamily = famSelect.value; scheduleRender(); };
+    famSelect.onchange = () => { pushHistory(); layer.fontFamily = famSelect.value; scheduleRender(); };
     cfRow.appendChild(colorInput); cfRow.appendChild(famSelect);
     body.appendChild(field("색 / 글꼴", cfRow));
 
@@ -737,7 +819,7 @@
       const b = document.createElement("button");
       b.type = "button"; b.className = "seg-btn"; b.textContent = lab;
       b.setAttribute("aria-pressed", String(layer.align === val));
-      b.onclick = () => { layer.align = val; renderLayerList(); scheduleRender(); };
+      b.onclick = () => { pushHistory(); layer.align = val; renderLayerList(); scheduleRender(); };
       alignGroup.appendChild(b);
     });
     body.appendChild(field("정렬", alignGroup));
@@ -748,11 +830,12 @@
     const outlineLabel = document.createElement("label");
     const outlineChk = document.createElement("input");
     outlineChk.type = "checkbox"; outlineChk.checked = layer.outline;
-    outlineChk.onchange = () => { layer.outline = outlineChk.checked; scheduleRender(); };
+    outlineChk.onchange = () => { pushHistory(); layer.outline = outlineChk.checked; scheduleRender(); };
     outlineLabel.appendChild(outlineChk);
     outlineLabel.appendChild(document.createTextNode("외곽선"));
     const outlineColor = document.createElement("input");
     outlineColor.type = "color"; outlineColor.value = layer.outlineColor;
+    outlineColor.addEventListener("focus", () => pushHistory());
     outlineColor.oninput = () => { layer.outlineColor = outlineColor.value; scheduleRender(); };
     outlineRow.appendChild(outlineLabel); outlineRow.appendChild(outlineColor);
     body.appendChild(field("", outlineRow));
@@ -763,11 +846,12 @@
     const bgLabel = document.createElement("label");
     const bgChk = document.createElement("input");
     bgChk.type = "checkbox"; bgChk.checked = layer.bg;
-    bgChk.onchange = () => { layer.bg = bgChk.checked; scheduleRender(); };
+    bgChk.onchange = () => { pushHistory(); layer.bg = bgChk.checked; scheduleRender(); };
     bgLabel.appendChild(bgChk);
     bgLabel.appendChild(document.createTextNode("배경 박스"));
     const bgColor = document.createElement("input");
     bgColor.type = "color"; bgColor.value = layer.bgColor;
+    bgColor.addEventListener("focus", () => pushHistory());
     bgColor.oninput = () => { layer.bgColor = bgColor.value; scheduleRender(); };
     bgRow.appendChild(bgLabel); bgRow.appendChild(bgColor);
     body.appendChild(field("", bgRow));
@@ -775,6 +859,7 @@
     const opacityInput = document.createElement("input");
     opacityInput.type = "range"; opacityInput.min = 0; opacityInput.max = 100; opacityInput.value = layer.bgOpacity;
     const opacityVal = document.createElement("div"); opacityVal.className = "rangeval"; opacityVal.textContent = layer.bgOpacity + "%";
+    opacityInput.addEventListener("focus", () => pushHistory());
     opacityInput.oninput = () => { layer.bgOpacity = Number(opacityInput.value); opacityVal.textContent = layer.bgOpacity + "%"; scheduleRender(); };
     const opacityWrap = document.createElement("div");
     opacityWrap.appendChild(opacityInput); opacityWrap.appendChild(opacityVal);
@@ -784,6 +869,7 @@
     delBtn.type = "button"; delBtn.className = "btn btn-sm btn-danger";
     delBtn.textContent = "이 문구 삭제";
     delBtn.onclick = () => {
+      pushHistory();
       const idx = state.texts.findIndex(t => t.id === layer.id);
       if (idx >= 0) state.texts.splice(idx, 1);
       if (state.selectedId === layer.id){
@@ -819,6 +905,7 @@
     const pt = getCanvasPoint(e);
     const layer = hitTest(pt);
     if (layer){
+      pushHistory();
       state.selectedId = layer.id;
       state.dragId = layer.id;
       const { w, h } = RATIOS[state.ratio];
@@ -862,6 +949,7 @@
   stageWrap.addEventListener("drop", (e) => { const f = e.dataTransfer.files[0]; if (f) handleImageFile(f); });
 
   $("#removeImageBtn").addEventListener("click", () => {
+    pushHistory();
     state.image = null;
     imageActionsField.hidden = true;
     refreshPresets();
@@ -869,9 +957,11 @@
     showStatus("info","이미지를 제거했어요.");
   });
 
+  bgColorInput.addEventListener("focus", () => pushHistory());
   bgColorInput.addEventListener("input", () => { state.bgColor = bgColorInput.value; scheduleRender(); });
 
   $("#addLayerBtn").addEventListener("click", () => {
+    pushHistory();
     const n = state.texts.length;
     const layer = defaultLayer({ content:"새 문구", y: Math.min(0.9, 0.3 + n*0.12) });
     state.texts.push(layer);
@@ -1174,6 +1264,7 @@
     refreshPresets();
     renderLayerList();
     renderTplList();
+    refreshUndoRedoButtons();
     sctx.fillStyle = "#ffffff";
     sctx.fillRect(0,0,stage.width, stage.height);
     await ensureFonts();
